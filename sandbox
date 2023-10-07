@@ -1,0 +1,43 @@
+#define SFRX_IMPL_REC_9(BIN,L,R,...) BIN(L,R)__VA_OPT__(,SFRX_IMPL_REC_9(BIN,L,__VA_ARGS__))
+#define SFRX_IMPL_REC_8(BIN,L,R,...) BIN(L,R)__VA_OPT__(,SFRX_IMPL_REC_9(BIN,L,__VA_ARGS__))
+#define SFRX_IMPL_REC_7(BIN,L,R,...) BIN(L,R)__VA_OPT__(,SFRX_IMPL_REC_8(BIN,L,__VA_ARGS__))
+#define SFRX_IMPL_REC_6(BIN,L,R,...) BIN(L,R)__VA_OPT__(,SFRX_IMPL_REC_7(BIN,L,__VA_ARGS__))
+#define SFRX_IMPL_REC_5(BIN,L,R,...) BIN(L,R)__VA_OPT__(,SFRX_IMPL_REC_6(BIN,L,__VA_ARGS__))
+#define SFRX_IMPL_REC_4(BIN,L,R,...) BIN(L,R)__VA_OPT__(,SFRX_IMPL_REC_5(BIN,L,__VA_ARGS__))
+#define SFRX_IMPL_REC_3(BIN,L,R,...) BIN(L,R)__VA_OPT__(,SFRX_IMPL_REC_4(BIN,L,__VA_ARGS__))
+#define SFRX_IMPL_REC_2(BIN,L,R,...) BIN(L,R)__VA_OPT__(,SFRX_IMPL_REC_3(BIN,L,__VA_ARGS__))
+#define SFRX_IMPL_REC_1(BIN,L,R,...) BIN(L,R)__VA_OPT__(,SFRX_IMPL_REC_2(BIN,L,__VA_ARGS__))
+#define SFRX_IMPL_REC_0(BIN,L,R,...) BIN(L,R)__VA_OPT__(,SFRX_IMPL_REC_1(BIN,L,__VA_ARGS__))
+#define SFRX_IMPL_APPLY(BIN,L,R,...) BIN(L,R)__VA_OPT__(,SFRX_IMPL_REC_0(BIN,L,__VA_ARGS__))
+#define SFRX_IMPL_CONCAT_MSK(SFR,M) SFR##_##M##_Msk
+#define SFRX(I,R,...)                                                    \
+    aux::sfrx<std::remove_pointer_t<decltype (I)>,                       \
+              std::string_view("FLASH") == #I ? FLASH_R_BASE : I##_BASE, \
+              std::remove_cv_t<decltype (I->R)>,                         \
+              0,                                                         \
+              offsetof(std::remove_pointer_t<decltype (I)>, R),          \
+              SFRX_IMPL_APPLY(SFRX_IMPL_CONCAT_MSK, I##_##R, __VA_ARGS__)>
+#define SFRnX(I,R,n,...)                                                                   \
+    aux::sfrx<std::remove_pointer_t<decltype (I)>,                                         \
+              std::string_view("FLASH") == #I ? FLASH_R_BASE : I##_BASE,                   \
+              std::remove_reference_t<std::remove_cv_t<decltype (I->R[0])>>,               \
+              (n-1),                                                                       \
+              offsetof(std::remove_pointer_t<decltype (I)>, R) + sizeof (I->R[0]) * (n-1), \
+              SFRX_IMPL_APPLY(SFRX_IMPL_CONCAT_MSK, I##_##R##n, __VA_ARGS__)>
+
+using test1 = SFRX(FLASH, ACR, PRFTEN);
+using test2 = SFRnX(SYSCFG, EXTICR, 2, EXTI5);
+
+/////////////////////////////////////////////////////////////////////////////
+using test1 = aux::sfrx<std::remove_pointer_t<decltype (FLASH)>,
+                        std::string_view("FLASH") == "FLASH" ? FLASH_R_BASE : FLASH_BASE,
+                        std::remove_cv_t<decltype (FLASH->ACR)>,
+                        0,
+                        offsetof(std::remove_pointer_t<decltype (FLASH)>, ACR),
+                        FLASH_ACR_PRFTEN_Msk>;
+using test2 = aux::sfrx<std::remove_pointer_t<decltype (SYSCFG)>,
+                        std::string_view("FLASH") == "SYSCFG" ? FLASH_R_BASE : SYSCFG_BASE,
+                        std::remove_reference_t<std::remove_cv_t<decltype (SYSCFG->EXTICR[0])>>,
+                        (2 -1),
+                        offsetof(std::remove_pointer_t<decltype (SYSCFG)>, EXTICR) + sizeof (SYSCFG->EXTICR[0]) * (2 -1),
+                        SYSCFG_EXTICR2_EXTI5_Msk>;
