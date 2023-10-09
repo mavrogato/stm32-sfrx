@@ -15,17 +15,31 @@ extern "C" int __io_putchar(int ch) { return ITM_SendChar(ch); }
 
 namespace aux
 {
-    inline auto get(auto volatile* ptr, auto mask) noexcept {
-        return (*ptr & mask);
+    inline auto get(auto volatile& reg, auto mask) noexcept {
+        return (reg & mask);
     }
-    inline void reset(auto volatile* ptr, auto val = 0) noexcept {
-        *ptr = val;
+    inline void drop(auto volatile& reg) noexcept {
+    	[[maybe_unused]] auto volatile tmp = reg;
     }
-    inline void set(auto volatile* ptr, auto val) noexcept {
-        *ptr = *ptr | val;
+    inline void reset(auto volatile& reg, auto val = 0) noexcept {
+        reg = val;
     }
-    inline void set(auto volatile* ptr, auto val, auto clear) noexcept {
-        *ptr = (*ptr & ~clear) | val;
+    inline void set(auto volatile& reg, auto val) noexcept {
+    	reg = reg | val;
+    }
+    inline void set(auto volatile& reg, auto val, auto clear) noexcept {
+    	reg = (reg & ~clear) | val;
+    }
+    template <auto VALUE, auto MASK>
+    inline void set_with_delay(auto volatile& reg) noexcept {
+    	constexpr auto absolute_value = VALUE << std::countr_zero(MASK);
+    	if constexpr (1 < std::popcount(MASK)) {
+    		set(reg, absolute_value, MASK);
+    	}
+    	else {
+    		set(reg, absolute_value);
+    	}
+    	drop(reg);
     }
 
     template <class INTERFACE, size_t BASE,
@@ -44,11 +58,11 @@ namespace aux
         static constexpr auto combined_clear = ((std::has_single_bit(MASK) ? 0 : MASK) | ...);
 
     private:
-        static inline auto pointer() noexcept {
-            return reinterpret_cast<register_type volatile *const>(address);
+        static inline register_type volatile& load_register() noexcept {
+            return *reinterpret_cast<register_type volatile *const>(address);
         }
 
-        template <REGISTER... VALUE>
+        template <register_type... VALUE>
         static void check_values() noexcept {
             static_assert(sizeof... (MASK) == sizeof... (VALUE));
             static_assert(0 == ((VALUE & ~(MASK >> std::countr_zero(MASK))) | ...));
@@ -56,55 +70,46 @@ namespace aux
 
     public:
         static auto load() noexcept {
-            return std::array<REGISTER, nof_masks>{
-                (get(pointer(), MASK) >> std::countr_zero(MASK))...
+            return std::array<register_type, nof_masks>{
+                (get(load_register(), MASK) >> std::countr_zero(MASK))...
             };
         }
 
-        template <REGISTER... VALUE>
+        template <register_type... VALUE>
         static void confirm() noexcept {
             check_values<VALUE...>();
-            constexpr REGISTER combined_absolute_value = ((VALUE << std::countr_zero(MASK)) | ...);
-            while (get(pointer(), combined_mask) != combined_absolute_value) continue;
+            constexpr register_type combined_absolute_value = ((VALUE << std::countr_zero(MASK)) | ...);
+            while (get(load_register(), combined_mask) != combined_absolute_value) continue;
         }
 
-        template <REGISTER... VALUE>
+        template <register_type... VALUE>
         static void reset() noexcept {
             check_values<VALUE...>();
             constexpr REGISTER combined_absolute_value = ((VALUE << std::countr_zero(MASK)) | ...);
-            set(pointer(), combined_absolute_value);
+            set(load_register(), combined_absolute_value);
         }
 
-        template <REGISTER... VALUE>
+        template <register_type... VALUE>
         static void store() noexcept {
             check_values<VALUE...>();
             constexpr REGISTER combined_absolute_value = ((VALUE << std::countr_zero(MASK)) | ...);
             if constexpr (combined_clear) {
-                set(pointer(), combined_absolute_value, combined_clear);
+                set(load_register(), combined_absolute_value, combined_clear);
             }
             else {
-                set(pointer(), combined_absolute_value);
+                set(load_register(), combined_absolute_value);
             }
         }
-        template <REGISTER... VALUE>
+        template <register_type... VALUE>
         static void store_confirm() noexcept {
             store<VALUE...>();
             confirm<VALUE...>();
         }
-        template <REGISTER... VALUE>
+
+        template <register_type... VALUE>
         static void store_delay() noexcept {
             check_values<VALUE...>();
-            ([]() {
-                constexpr REGISTER absolute_value = VALUE << std::countr_zero(MASK);
-                if constexpr (1 < std::popcount(MASK)) {
-                    set(pointer(), absolute_value, MASK);
-                }
-                else {
-                    set(pointer(), absolute_value);
-                }
-                auto tmp = get(pointer(), MASK);
-                (void) tmp;
-            }(), ...);
+            (set_with_delay<VALUE, MASK>(load_register()), ...);
         }
 
     public:
@@ -113,10 +118,10 @@ namespace aux
         }
 
     private:
-        static_assert(std::is_unsigned_v<REGISTER>);
-        static_assert(0 < sizeof...(MASK));
+        static_assert(std::is_unsigned_v<register_type>);
+        static_assert(0 < nof_masks);
         static_assert(((digits == std::countl_zero(MASK) + std::popcount(MASK) + std::countr_zero(MASK)) && ...));
-        static_assert(std::popcount((MASK | ...)) == (std::popcount(MASK) + ...));
+        static_assert(std::popcount(combined_mask) == (std::popcount(MASK) + ...));
     };
 } // ::aux
 
@@ -151,12 +156,31 @@ namespace aux
               std::string_view("FLASH") == #I ? FLASH_R_BASE : I##_BASE,     \
               std::remove_reference_t<std::remove_cv_t<decltype (I->R[0])>>, \
               (n-1),                                                         \
-              offsetof(std::remove_pointer_t<decltype (I)>, R), \
+              offsetof(std::remove_pointer_t<decltype (I)>, R),              \
               SFRX_IMPL_APPLY(SFRX_IMPL_CONCAT_MSK, I##_##R##n, __VA_ARGS__)>
+#define SFxRnX(I,x,R,n,...)                                                     \
+    aux::sfrx<std::remove_pointer_t<decltype (I##x)>,                           \
+              std::string_view("FLASH") == #I ? FLASH_R_BASE : I##x##_BASE,     \
+              std::remove_reference_t<std::remove_cv_t<decltype (I##x->R[0])>>, \
+              (n-1),                                                            \
+              offsetof(std::remove_pointer_t<decltype (I##x)>, R),              \
+              SFRX_IMPL_APPLY(SFRX_IMPL_CONCAT_MSK, I##_##R##n, __VA_ARGS__)>
+
 
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
+
+inline auto sleep_for_ms(uint32_t delay_ms) noexcept {
+	//uint32_t delay_ms = std::chrono::duration_cast<std::chrono::milliseconds>(delay).count();
+	if (delay_ms == 0) delay_ms++;
+	aux::drop(SysTick->CTRL);
+	while (delay_ms) {
+		if (auto [flag] = SFRX(SysTick, CTRL, COUNTFLAG)::load(); flag != 0) {
+		  delay_ms--;
+		}
+	}
+}
 
 int main(void)
 {
@@ -188,9 +212,24 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-      LL_mDelay(125);
-      LL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-      //std::puts("Tick...");
+	  if (auto [c13i] = SFxRX(GPIO, C, IDR, ID13)::load(); c13i) {
+		  sleep_for_ms(500);
+
+		  USART2->DR = '*';
+	  }
+	  else {
+		  sleep_for_ms(125);
+
+		  USART2->DR = '-';
+	  }
+	  SFxRX(USART, 2, SR, TXE)::confirm<1>();
+
+	  if (auto [a05o] = SFxRX(GPIO, A, ODR, OD5)::load(); a05o) {
+		  SFxRX(GPIO, A, BSRR, BS5, BR5)::reset<0, 1>();
+	  }
+	  else {
+		  SFxRX(GPIO, A, BSRR, BS5, BR5)::reset<1, 0>();
+	  }
   }
   /* USER CODE END 3 */
 }
@@ -263,29 +302,32 @@ void SystemClock_Config(void)
   */
 static void MX_USART2_UART_Init(void)
 {
+	SFRX(RCC, APB1ENR, USART2EN)::store_delay<1>();
+//  /* Peripheral clock enable */
+//  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART2);
+	SFRX(RCC, AHB1ENR, GPIOAEN)::store_delay<1>();
+//  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);
 
-  /* USER CODE BEGIN USART2_Init 0 */
-
-  /* USER CODE END USART2_Init 0 */
-
-
-  /* Peripheral clock enable */
-  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_USART2);
-
-  LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);
-  /**USART2 GPIO Configuration
-  PA2   ------> USART2_TX
-  PA3   ------> USART2_RX
-  */
-
-  LL_GPIO_InitTypeDef GPIO_InitStruct = {};
-  GPIO_InitStruct.Pin = USART_TX_Pin|USART_RX_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
-  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
-  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  GPIO_InitStruct.Alternate = LL_GPIO_AF_7;
-  LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+	SFxRX(GPIO, A, OSPEEDR, OSPEED2, OSPEED3)::store<3, 3>();
+	SFxRX(GPIO, A, OTYPER, OT2, OT3)::store<0, 0>();
+	SFxRX(GPIO, A, PUPDR, PUPD2, PUPD3)::store<0, 0>();
+//	SFxRnX(GPIO, A, AFR, 1, AFSEL2, AFSEL3)::store<0, 0>();
+	aux::set(GPIOA->AFR[0],
+			 (7 << GPIO_AFRL_AFSEL2_Pos) | (7 << GPIO_AFRL_AFSEL3_Pos),
+			 GPIO_AFRL_AFSEL2_Msk | GPIO_AFRL_AFSEL3_Msk);
+	SFxRX(GPIO, A, MODER, MODER2, MODER3)::store<2, 2>();
+//  /**USART2 GPIO Configuration
+//  PA2   ------> USART2_TX
+//  PA3   ------> USART2_RX
+//  */
+//  LL_GPIO_InitTypeDef GPIO_InitStruct = {};
+//  GPIO_InitStruct.Pin = USART_TX_Pin|USART_RX_Pin;
+//  GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
+//  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
+//  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+//  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+//  GPIO_InitStruct.Alternate = LL_GPIO_AF_7;
+//  LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN USART2_Init 1 */
 
@@ -299,7 +341,8 @@ static void MX_USART2_UART_Init(void)
   USART_InitStruct.HardwareFlowControl = LL_USART_HWCONTROL_NONE;
   USART_InitStruct.OverSampling = LL_USART_OVERSAMPLING_16;
   LL_USART_Init(USART2, &USART_InitStruct);
-  LL_USART_ConfigAsyncMode(USART2);
+    SFxRX(USART, 2, CR2, LINEN, CLKEN)::store<0, 0>();
+//  LL_USART_ConfigAsyncMode(USART2);
   LL_USART_Enable(USART2);
   /* USER CODE BEGIN USART2_Init 2 */
 
@@ -329,31 +372,40 @@ static void MX_GPIO_Init(void)
 //  /**/
 //  LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTC, LL_SYSCFG_EXTI_LINE13);
 
-  /**/
-  LL_EXTI_InitTypeDef EXTI_InitStruct = {};
-  EXTI_InitStruct.Line_0_31 = LL_EXTI_LINE_13;
-  EXTI_InitStruct.LineCommand = ENABLE;
-  EXTI_InitStruct.Mode = LL_EXTI_MODE_IT;
-  EXTI_InitStruct.Trigger = LL_EXTI_TRIGGER_FALLING;
-  LL_EXTI_Init(&EXTI_InitStruct);
+    SFRX(EXTI, EMR, MR13)::store<0>();
+    SFRX(EXTI, IMR, MR13)::store<1>();
+    SFRX(EXTI, RTSR, TR13)::store<0>();
+    SFRX(EXTI, FTSR, TR13)::store<1>();
 
-  /**/
-  LL_GPIO_SetPinPull(B1_GPIO_Port, B1_Pin, LL_GPIO_PULL_NO);
+//  /**/
+//  LL_EXTI_InitTypeDef EXTI_InitStruct = {};
+//  EXTI_InitStruct.Line_0_31 = LL_EXTI_LINE_13;
+//  EXTI_InitStruct.LineCommand = ENABLE;
+//  EXTI_InitStruct.Mode = LL_EXTI_MODE_IT;
+//  EXTI_InitStruct.Trigger = LL_EXTI_TRIGGER_FALLING;
+//  LL_EXTI_Init(&EXTI_InitStruct);
 
-  /**/
-  LL_GPIO_SetPinMode(B1_GPIO_Port, B1_Pin, LL_GPIO_MODE_INPUT);
+    SFxRX(GPIO, C, PUPDR, PUPD13)::store<0>();
+//  /**/
+//  LL_GPIO_SetPinPull(B1_GPIO_Port, B1_Pin, LL_GPIO_PULL_NO);
 
-  /**/
-  LL_GPIO_InitTypeDef GPIO_InitStruct = {};
-  GPIO_InitStruct.Pin = LD2_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
-  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  LL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+    SFxRX(GPIO, C, MODER, MODER13)::store<0>();
+//  /**/
+//  LL_GPIO_SetPinMode(B1_GPIO_Port, B1_Pin, LL_GPIO_MODE_INPUT);
 
-/* USER CODE BEGIN MX_GPIO_Init_2 */
-/* USER CODE END MX_GPIO_Init_2 */
+    SFxRX(GPIO, A, OSPEEDR, OSPEED5)::store<0>();
+    SFxRX(GPIO, A, OTYPER, OT5)::store<0>();
+    SFxRX(GPIO, A, PUPDR, PUPD5)::store<0>();
+    SFxRX(GPIO, A, MODER, MODER5)::store<1>();
+
+//  /**/
+//  LL_GPIO_InitTypeDef GPIO_InitStruct = {};
+//  GPIO_InitStruct.Pin = LD2_Pin;
+//  GPIO_InitStruct.Mode = LL_GPIO_MODE_OUTPUT;
+//  GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_LOW;
+//  GPIO_InitStruct.OutputType = LL_GPIO_OUTPUT_PUSHPULL;
+//  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
+//  LL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
 }
 
 /* USER CODE BEGIN 4 */
